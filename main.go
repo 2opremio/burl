@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,7 +14,24 @@ import (
 )
 
 func main() {
+	concurrencyFlag := flag.Uint("concurrency", 12, "number of concurrent requests to make")
+	errorFileFlag := flag.String("error-file", "", "file where to store errors")
+	timeoutSecondsFlag := flag.Uint("timeout-seconds", 5, "http client timeout")
 	flag.Parse()
+	if *concurrencyFlag < 1 {
+		fmt.Printf("-concurrency value < 1: %d\n", *concurrencyFlag)
+		os.Exit(1)
+	}
+	var errorFile *os.File
+	if *errorFileFlag != "" {
+		var err error
+		errorFile, err = os.Create(*errorFileFlag)
+		if err != nil {
+			fmt.Printf("%s: %s\n", *concurrencyFlag, err)
+			os.Exit(1)
+		}
+	}
+	concurrency := int(*concurrencyFlag)
 
 	var input io.Reader
 	input = os.Stdin
@@ -29,10 +45,17 @@ func main() {
 		input = file
 	}
 
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   time.Duration(*timeoutSecondsFlag) * time.Second,
+	}
+
 	sc := bufio.NewScanner(input)
 
 	urls := make(chan string, 128)
-	concurrency := 12
 	var wg sync.WaitGroup
 	wg.Add(concurrency)
 
@@ -42,24 +65,22 @@ func main() {
 
 				u, err := url.ParseRequestURI(raw)
 				if err != nil {
-					fmt.Printf("invalid url: %s\n", raw)
+					log(errorFile, "%s: invalid url: %s\n", raw, err)
 					continue
 				}
 
-				if !resolves(u) {
-					fmt.Printf("does not resolve: %s\n", u)
-					continue
-				}
-
-				resp, err := fetchURL(u)
+				resp, err := fetchURL(client, u)
 				if err != nil {
-					fmt.Printf("failed to fetch: %s (%s)\n", u, err)
+					log(errorFile, "%s: %s\n", u, err)
 					continue
 				}
 
 				if resp.StatusCode != http.StatusOK {
-					fmt.Printf("non-200 response code: %s (%s)\n", u, resp.Status)
+					log(errorFile, "%s: non-200 response code: %s\n", u, resp.Status)
+					continue
 				}
+
+				fmt.Printf("%s: OK\n", u)
 			}
 			wg.Done()
 		}()
@@ -68,29 +89,25 @@ func main() {
 	for sc.Scan() {
 		urls <- sc.Text()
 	}
+	wg.Wait()
+
 	close(urls)
 
 	if sc.Err() != nil {
 		fmt.Printf("error: %s\n", sc.Err())
 	}
 
-	wg.Wait()
 }
 
-func resolves(u *url.URL) bool {
-	addrs, _ := net.LookupHost(u.Hostname())
-	return len(addrs) != 0
+func log(errorFile *os.File, pattern string, a ...interface{}) {
+	if errorFile != nil {
+		fmt.Fprintf(errorFile, pattern, a...)
+	}
+	// Also log to stdout
+	fmt.Printf(pattern, a...)
 }
 
-func fetchURL(u *url.URL) (*http.Response, error) {
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	client := http.Client{
-		Transport: tr,
-		Timeout:   5 * time.Second,
-	}
-
+func fetchURL(client *http.Client, u *url.URL) (*http.Response, error) {
 	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		return nil, err
