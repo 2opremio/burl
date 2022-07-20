@@ -89,9 +89,10 @@ func main() {
 	for sc.Scan() {
 		urls <- sc.Text()
 	}
-	wg.Wait()
 
 	close(urls)
+
+	wg.Wait()
 
 	if sc.Err() != nil {
 		fmt.Printf("error: %s\n", sc.Err())
